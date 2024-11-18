@@ -1,0 +1,11 @@
+[package]
+name = "libnexus"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0"
+
+[dependencies]
+bytes = "1.8.0"
+serde = "1.0.215"
+tokio.workspace = true
+tracing = "0.1.40"

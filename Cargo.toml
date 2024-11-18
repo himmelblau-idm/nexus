@@ -1,0 +1,21 @@
+[workspace]
+members = [
+	"smb3-client",
+	"libnexus",
+	"smb3-server"
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = [
+    "David Mulder <dmulder@samba.org>"
+]
+rust-version = "1.66"
+edition = "2021"
+license = "GPL-3.0-or-later"
+homepage = "https://github.com/himmelblau-idm/nexus"
+repository = "https://github.com/himmelblau-idm/nexus"
+
+[workspace.dependencies]
+tokio = { version = "1.41.1", features = ["rt", "macros", "sync", "time", "net", "io-util", "signal", "rt-multi-thread"] }

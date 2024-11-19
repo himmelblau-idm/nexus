@@ -15,32 +15,11 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+use libnexus::server::Server;
 use std::error::Error;
-use tokio::net::TcpListener;
-
-mod handler;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Start the TCP listener
-    let listener = TcpListener::bind("127.0.0.1:445").await?;
-
-    loop {
-        // Accept an incoming connection
-        match listener.accept().await {
-            Ok((mut stream, addr)) => {
-                println!("Accepted connection from {}", addr);
-
-                // Spawn a new task for each connection
-                tokio::spawn(async move {
-                    if let Err(e) = handler::handle_client(&mut stream).await {
-                        eprintln!("Error handling client {}: {}", addr, e);
-                    }
-                });
-            }
-            Err(e) => {
-                eprintln!("Failed to accept connection: {}", e);
-            }
-        }
-    }
+    let server = Server::new("127.0.0.1", 445, vec![]);
+    server.serve().await
 }

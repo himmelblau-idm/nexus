@@ -15,12 +15,22 @@
    You should have received a copy of the GNU Lesser General Public License
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
-use crate::{error::*, packets::SmbPacket};
 use tokio::net::TcpStream;
 
-pub async fn negotiate_dialect(stream: &mut TcpStream) -> Result<(), NtStatus> {
-    let req = SmbPacket::from_stream(stream, true).await?;
-    println!("{:?}", req);
+mod negotiate;
 
-    Err(NT_STATUS_NOT_IMPLEMENTED)
+pub(crate) struct Session<'a> {
+    stream: &'a mut TcpStream,
+    server_guid: u128,
+    session_id: u64,
+}
+
+impl<'a> Session<'a> {
+    pub(crate) fn new(stream: &'a mut TcpStream, server_guid: u128) -> Self {
+        Session {
+            stream,
+            server_guid,
+            session_id: 0, // Initialized to 0. Will be established later.
+        }
+    }
 }

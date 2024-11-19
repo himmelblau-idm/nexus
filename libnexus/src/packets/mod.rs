@@ -16,10 +16,49 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 use crate::error::*;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
+use chrono::{LocalResult, TimeZone, Utc};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tracing::error;
+
+#[macro_export]
+macro_rules! error_resp_send {
+    ($stream:expr, $command:expr, $message_id:expr, $error:expr) => {{
+        let resp = SmbPacket {
+            header: SMBHeaderSync {
+                protocol_id: PROTOCOL_ID,
+                structure_size: 0x40,
+                credit_charge: 0,
+                interpret: StatusChannelSequenceInterpretation::Status(
+                    $error.val(),
+                ),
+                command: $command as u16,
+                credits: 1,
+                flags: SMB2_FLAGS_SERVER_TO_REDIR,
+                next_command: 0,
+                message_id: $message_id,
+                reserved: 0,
+                tree_id: 0,
+                session_id: 0,
+                signature: 0,
+            },
+            payload: Payload::ErrorResponse(ErrorResponse {
+                structure_size: 9,
+                error_context_count: 0,
+                reserved: 0,
+                byte_count: 0,
+                error_data: vec![],
+            }),
+        };
+        let mut bytes = BytesMut::new();
+        resp.to_bytes(&mut bytes);
+        $stream.write_all(&bytes).await.map_err(|e| {
+            error!("{:?}", e);
+            NT_STATUS_NETWORK_BUSY
+        })?;
+    }};
+}
 
 macro_rules! read_bytes_from_stream {
     ($stream:expr, $count:expr) => {{
@@ -32,14 +71,39 @@ macro_rules! read_bytes_from_stream {
     }};
 }
 
+#[macro_export]
+macro_rules! write_netbios_header_to_bytes {
+    ($bytes:expr, $length:expr) => {{
+        $bytes.put_u8(0 as u8);
+        let length: u32 = $length;
+        let bytes = length.to_be_bytes();
+        $bytes.put_slice(&bytes[1..]);
+    }};
+}
+
 pub const NETBIOS_SESSION_MESSAGE: u8 = 0x00;
 pub const PROTOCOL_ID: u32 = 0x424D53FE;
 pub const SMB2_FLAGS_ASYNC_COMMAND: u32 = 0x00000002;
+pub const SMB_3_1_1_DIALECT: u16 = 0x0311;
+pub const SMB2_FLAGS_SERVER_TO_REDIR: u32 = 0x00000001;
+
+// SecurityMode
+pub const SMB2_NEGOTIATE_SIGNING_ENABLED: u16 = 0x0001;
+pub const SMB2_NEGOTIATE_SIGNING_REQUIRED: u16 = 0x0002;
+
+// Capabilities
+pub const SMB2_GLOBAL_CAP_DFS: u32 = 0x00000001;
+pub const SMB2_GLOBAL_CAP_LEASING: u32 = 0x00000002;
+pub const SMB2_GLOBAL_CAP_LARGE_MTU: u32 = 0x00000004;
+pub const SMB2_GLOBAL_CAP_MULTI_CHANNEL: u32 = 0x00000008;
+pub const SMB2_GLOBAL_CAP_PERSISTENT_HANDLES: u32 = 0x00000010;
+pub const SMB2_GLOBAL_CAP_DIRECTORY_LEASING: u32 = 0x00000020;
+pub const SMB2_GLOBAL_CAP_ENCRYPTION: u32 = 0x00000040;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SmbPacket {
-    header: SMBHeaderSync,
-    payload: Payload,
+    pub header: SMBHeaderSync,
+    pub payload: Payload,
 }
 
 impl SmbPacket {
@@ -127,10 +191,28 @@ impl SmbPacket {
 
         Ok(SmbPacket { header, payload })
     }
+
+    pub fn to_bytes(&self, bytes: &mut BytesMut) {
+        let mut smb3_bytes = BytesMut::new();
+        self.header.to_bytes(&mut smb3_bytes);
+        match &self.payload {
+            Payload::ErrorResponse(resp) => resp.to_bytes(&mut smb3_bytes),
+            Payload::NegotiateProtocolRequest(_req) => {
+                panic!("Not implemented yet")
+            } //TODO
+            Payload::NegotiateProtocolResponse(resp) => {
+                resp.to_bytes(&mut smb3_bytes)
+            }
+        }
+        let smb3_length = smb3_bytes.len();
+        write_netbios_header_to_bytes!(bytes, (4 + smb3_length) as u32);
+        bytes.extend_from_slice(&smb3_bytes);
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Payload {
+    ErrorResponse(ErrorResponse),
     NegotiateProtocolRequest(NegotiateProtocolRequest),
     NegotiateProtocolResponse(NegotiateProtocolResponse),
 }
@@ -152,10 +234,67 @@ pub struct SMBHeaderSync {
     pub flags: u32,
     pub next_command: u32,
     pub message_id: u64,
-    reserved: u32,
+    pub(crate) reserved: u32,
     pub tree_id: u32,
     pub session_id: u64,
     pub signature: u128,
+}
+
+impl SMBHeaderSync {
+    pub fn new(
+        credit_charge: u16,
+        interpret: StatusChannelSequenceInterpretation,
+        command: SmbCommand,
+        credits: u16,
+        flags: u32,
+        next_command: u32,
+        message_id: u64,
+        tree_id: u32,
+        session_id: u64,
+    ) -> Self {
+        SMBHeaderSync {
+            protocol_id: PROTOCOL_ID,
+            structure_size: 0x40,
+            credit_charge,
+            interpret,
+            command: command as u16,
+            credits,
+            flags,
+            next_command,
+            message_id,
+            reserved: 0,
+            tree_id,
+            session_id,
+            signature: 0, //TODO
+        }
+    }
+
+    pub fn to_bytes(&self, bytes: &mut BytesMut) {
+        bytes.put_u32_le(self.protocol_id);
+        bytes.put_u16_le(self.structure_size);
+        bytes.put_u16_le(self.credit_charge);
+        match self.interpret {
+            StatusChannelSequenceInterpretation::ChannelSequence(
+                channel_sequence,
+                reserved,
+            ) => {
+                bytes.put_u16_le(channel_sequence);
+                bytes.put_u16_le(reserved);
+            }
+            StatusChannelSequenceInterpretation::Status(status) => {
+                bytes.put_u32_le(status);
+            }
+        }
+        bytes.put_u16_le(self.command);
+        bytes.put_u16_le(self.credits);
+        bytes.put_u32_le(self.flags);
+        bytes.put_u32_le(self.next_command);
+        bytes.put_u64_le(self.message_id);
+        bytes.put_u32_le(self.reserved);
+        bytes.put_u32_le(self.tree_id);
+        bytes.put_u64_le(self.session_id);
+        bytes.put_u128_le(self.signature);
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -183,11 +322,46 @@ pub enum SmbCommand {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct ErrorResponse {
+    pub structure_size: u16,
+    pub error_context_count: u8,
+    pub(crate) reserved: u8,
+    pub byte_count: u32,
+    pub error_data: Vec<u8>,
+}
+
+impl ErrorResponse {
+    pub fn to_bytes(&self, bytes: &mut BytesMut) {
+        bytes.put_u16_le(self.structure_size);
+        bytes.put_u8(self.error_context_count);
+        bytes.put_u8(self.reserved);
+        bytes.put_u32_le(self.byte_count);
+        // 1 bytes padding?
+        bytes.put_u8(0);
+        for byte in &self.error_data {
+            bytes.put_u8(*byte);
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct NegotiateContext {
     pub context_type: u16,
     pub data_length: u16,
     reserved: u32,
     pub data: Vec<u8>,
+}
+
+impl NegotiateContext {
+    pub fn to_bytes(&self, bytes: &mut BytesMut) {
+        bytes.put_u16_le(self.context_type);
+        bytes.put_u16_le(self.data_length);
+        bytes.put_u32_le(self.reserved);
+
+        for byte in &self.data {
+            bytes.put_u8(*byte);
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -241,7 +415,7 @@ impl NegotiateProtocolRequest {
         }
         // Only fetch negotiate contexts if supported
         let mut negotiate_context_list = vec![];
-        if dialects.contains(&0x0311) {
+        if dialects.contains(&SMB_3_1_1_DIALECT) {
             for i in 0..negotiate_context_count {
                 let mut bytes = read_bytes_from_stream!(stream, 8);
                 let context_type = bytes.get_u16_le();
@@ -304,6 +478,75 @@ pub struct NegotiateProtocolResponse {
     pub security_buffer_length: u16,
     pub negotiate_context_offset: u32,
     pub buffer: Vec<u8>,
-    padding: Vec<u8>,
+    pub(crate) padding: Vec<u8>,
     pub negotiate_context_list: Vec<NegotiateContext>,
+}
+
+impl NegotiateProtocolResponse {
+    pub fn new(server_guid: u128) -> Result<Self, NtStatus> {
+        let windows_epoch = match Utc.with_ymd_and_hms(1601, 1, 1, 0, 0, 0) {
+            LocalResult::Single(datetime) => datetime,
+            _ => return Err(NT_STATUS_UNSUCCESSFUL),
+        };
+        let now = Utc::now();
+        let duration_since_epoch = now.signed_duration_since(windows_epoch);
+        let intervals = (duration_since_epoch.num_seconds() as u64)
+            * 10_000_000
+            + (duration_since_epoch.num_nanoseconds().unwrap_or(0)
+                % 1_000_000_000
+                / 100) as u64;
+
+        Ok(NegotiateProtocolResponse {
+            structure_size: 65,
+            security_mode: SMB2_NEGOTIATE_SIGNING_ENABLED
+                | SMB2_NEGOTIATE_SIGNING_REQUIRED,
+            dialect_revision: SMB_3_1_1_DIALECT,
+            negotiate_context_count: 0, //TODO: add the negotiate contexts
+            server_guid,
+            capabilities: 0,
+            max_transact_size: 8388608,
+            max_read_size: 8388608,
+            max_write_size: 8388608,
+            system_time: intervals,
+            server_start_time: 0,
+            security_buffer_offset: 0,   //TODO
+            security_buffer_length: 0,   //TODO
+            negotiate_context_offset: 0, //TODO
+            buffer: vec![],
+            padding: vec![],
+            negotiate_context_list: vec![],
+        })
+    }
+
+    pub fn to_bytes(&self, bytes: &mut BytesMut) {
+        bytes.put_u16_le(self.structure_size);
+        bytes.put_u16_le(self.security_mode);
+        bytes.put_u16_le(self.dialect_revision);
+        bytes.put_u16_le(self.negotiate_context_count);
+        bytes.put_u128_le(self.server_guid);
+        bytes.put_u32_le(self.capabilities);
+        bytes.put_u32_le(self.max_transact_size);
+        bytes.put_u32_le(self.max_read_size);
+        bytes.put_u32_le(self.max_write_size);
+        bytes.put_u64_le(self.system_time);
+        bytes.put_u64_le(self.server_start_time);
+        bytes.put_u16_le(self.security_buffer_offset);
+        bytes.put_u16_le(self.security_buffer_length);
+        bytes.put_u32_le(self.negotiate_context_offset);
+
+        // Add the buffer
+        for byte in &self.buffer {
+            bytes.put_u8(*byte);
+        }
+
+        // Add the padding
+        for byte in &self.padding {
+            bytes.put_u8(*byte);
+        }
+
+        // Add the negotiate context list
+        for context in &self.negotiate_context_list {
+            context.to_bytes(bytes);
+        }
+    }
 }

@@ -2235,6 +2235,10 @@ pub const NT_STATUS_VHD_DIFFERENCING_CHAIN_ERROR_IN_PARENT: NtStatus =
     NtStatus(0xc03a0019);
 
 impl NtStatus {
+    pub fn val(&self) -> u32 {
+        self.0
+    }
+
     pub const fn is_ok(&self) -> bool {
         self.0 == NT_STATUS_OK.0
     }

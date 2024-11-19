@@ -15,4 +15,68 @@
    You should have received a copy of the GNU Lesser General Public License
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
-pub mod negotiation;
+use std::error::Error;
+use tokio::net::TcpListener;
+use tracing::{debug, error};
+use uuid::Uuid;
+
+mod handler;
+mod session;
+
+pub struct Share {
+    pub path: String,
+    pub read_only: bool,
+}
+
+pub struct Server {
+    server_guid: u128,
+    shares: Vec<Share>,
+    address: String,
+    port: u32,
+}
+
+impl Server {
+    pub fn new(address: &str, port: u32, shares: Vec<Share>) -> Self {
+        Server {
+            server_guid: Uuid::new_v4().as_u128(),
+            shares,
+            address: address.to_string(),
+            port,
+        }
+    }
+
+    pub async fn serve(&self) -> Result<(), Box<dyn Error>> {
+        let listener =
+            TcpListener::bind(format!("{}:{}", self.address, self.port))
+                .await?;
+
+        let server_guid = self.server_guid;
+        loop {
+            // Accept an incoming connection
+            match listener.accept().await {
+                Ok((mut stream, addr)) => {
+                    debug!("Accepted connection from SMB3 client {}", addr);
+
+                    // Spawn a new task for each connection
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            handler::handle_client(&mut stream, server_guid)
+                                .await
+                        {
+                            error!(
+                                "Error handling SMB3 client {}: {}",
+                                addr, e
+                            );
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to accept connection from SMB3 client: {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+}

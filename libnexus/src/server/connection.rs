@@ -19,15 +19,15 @@ use tokio::net::TcpStream;
 
 mod negotiate;
 
-pub(crate) struct Session<'a> {
+pub(crate) struct Connection<'a> {
     stream: &'a mut TcpStream,
     server_guid: u128,
     session_id: u64,
 }
 
-impl<'a> Session<'a> {
+impl<'a> Connection<'a> {
     pub(crate) fn new(stream: &'a mut TcpStream, server_guid: u128) -> Self {
-        Session {
+        Connection {
             stream,
             server_guid,
             session_id: 0, // Initialized to 0. Will be established later.

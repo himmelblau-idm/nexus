@@ -18,12 +18,12 @@
 use crate::error::*;
 use crate::error_resp_send;
 use crate::packets::*;
-use crate::server::session::Session;
+use crate::server::connection::Connection;
 use bytes::BytesMut;
 use tokio::io::AsyncWriteExt;
 use tracing::error;
 
-impl Session<'_> {
+impl Connection<'_> {
     pub async fn negotiate_dialect(&mut self) -> Result<(), NtStatus> {
         let req = SmbPacket::from_stream(self.stream, true).await?;
 

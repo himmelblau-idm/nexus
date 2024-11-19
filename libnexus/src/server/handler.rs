@@ -16,14 +16,14 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 use crate::error::*;
-use crate::server::session::Session;
+use crate::server::connection::Connection;
 use tokio::net::TcpStream;
 
 pub async fn handle_client(
     stream: &mut TcpStream,
     server_guid: u128,
 ) -> Result<(), NtStatus> {
-    let mut session = Session::new(stream, server_guid);
+    let mut session = Connection::new(stream, server_guid);
 
     session.negotiate_dialect().await?;
 

@@ -21,7 +21,7 @@ use tracing::{debug, error};
 use uuid::Uuid;
 
 mod handler;
-mod session;
+mod connection;
 
 pub struct Share {
     pub path: String,

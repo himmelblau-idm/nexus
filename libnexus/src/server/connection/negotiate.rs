@@ -24,7 +24,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::error;
 
 impl Connection<'_> {
-    pub async fn negotiate_dialect(&mut self) -> Result<(), NtStatus> {
+    pub(crate) async fn negotiate_dialect(&mut self) -> Result<(), NtStatus> {
         let req = SmbPacket::from_stream(self.stream, true).await?;
 
         match req.payload {
@@ -38,6 +38,48 @@ impl Connection<'_> {
                 {
                     return Err(NT_STATUS_PROTOCOL_NOT_SUPPORTED);
                 }
+                // We only support AES-GMAC signing
+                let signing_capabilities = neg_req
+                    .negotiate_context_list
+                    .iter()
+                    .find_map(|context| match &context.data {
+                        NegotiateContextData::SigningCapabilities(caps) => {
+                            Some(caps)
+                        }
+                        _ => None,
+                    });
+                if let Some(signing_capabilities) = signing_capabilities {
+                    if !signing_capabilities
+                        .signing_algorithms
+                        .contains(&AES_GMAC)
+                    {
+                        // Client doesn't support AES_GMAC signing
+                        return Err(NT_STATUS_PROTOCOL_NOT_SUPPORTED);
+                    }
+                } else {
+                    // Client doesn't support signing
+                    return Err(NT_STATUS_PROTOCOL_NOT_SUPPORTED);
+                }
+                // We require AES-256-GCM Encryption
+                let encryption_capabilities = neg_req
+                    .negotiate_context_list
+                    .iter()
+                    .find_map(|context| match &context.data {
+                        NegotiateContextData::EncryptionCapabilities(caps) => {
+                            Some(caps)
+                        }
+                        _ => None,
+                    });
+                if let Some(encryption_capabilities) = encryption_capabilities {
+                    if !encryption_capabilities.ciphers.contains(&AES_256_GCM) {
+                        // Client doesn't support AES_256_GCM encryption
+                        return Err(NT_STATUS_PROTOCOL_NOT_SUPPORTED);
+                    }
+                } else {
+                    // Client doesn't support encryption
+                    return Err(NT_STATUS_PROTOCOL_NOT_SUPPORTED);
+                }
+                let security_blob = self.create_security_blob()?;
                 let resp = SmbPacket {
                     header: SMBHeaderSync::new(
                         0,
@@ -53,7 +95,10 @@ impl Connection<'_> {
                         req.header.session_id,
                     ),
                     payload: Payload::NegotiateProtocolResponse(
-                        NegotiateProtocolResponse::new(self.server_guid)?,
+                        NegotiateProtocolResponse::new(
+                            self.ctx.server_guid,
+                            security_blob,
+                        )?,
                     ),
                 };
                 let mut bytes = BytesMut::new();

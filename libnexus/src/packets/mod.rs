@@ -75,7 +75,7 @@ macro_rules! read_bytes_from_stream {
 macro_rules! write_netbios_header_to_bytes {
     ($bytes:expr, $length:expr) => {{
         $bytes.put_u8(0 as u8);
-        let length: u32 = $length;
+        let length: u32 = $length - 4;
         let bytes = length.to_be_bytes();
         $bytes.put_slice(&bytes[1..]);
     }};
@@ -99,6 +99,16 @@ pub const SMB2_GLOBAL_CAP_MULTI_CHANNEL: u32 = 0x00000008;
 pub const SMB2_GLOBAL_CAP_PERSISTENT_HANDLES: u32 = 0x00000010;
 pub const SMB2_GLOBAL_CAP_DIRECTORY_LEASING: u32 = 0x00000020;
 pub const SMB2_GLOBAL_CAP_ENCRYPTION: u32 = 0x00000040;
+
+// Negotiate Context Type
+pub const SMB2_SIGNING_CAPABILITIES: u16 = 0x0008;
+pub const SMB2_ENCRYPTION_CAPABILITIES: u16 = 0x0002;
+
+// Signing Algorithm Id
+pub const AES_GMAC: u16 = 0x0002;
+
+// Encryption Ciphers
+pub const AES_256_GCM: u16 = 0x0004;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SmbPacket {
@@ -345,11 +355,82 @@ impl ErrorResponse {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub enum NegotiateContextData {
+    SigningCapabilities(SigningCapabilities),
+    EncryptionCapabilities(EncryptionCapabilities),
+    Data(Vec<u8>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SigningCapabilities {
+    pub signing_algorithm_count: u16,
+    pub signing_algorithms: Vec<u16>,
+}
+
+impl SigningCapabilities {
+    pub fn to_bytes(&self, bytes: &mut BytesMut) {
+        bytes.put_u16_le(self.signing_algorithm_count);
+        for signing_algorithm in &self.signing_algorithms {
+            bytes.put_u16_le(*signing_algorithm);
+        }
+    }
+
+    pub async fn from_stream(stream: &mut TcpStream) -> Result<Self, NtStatus> {
+        let mut bytes = read_bytes_from_stream!(stream, 2);
+        let signing_algorithm_count = bytes.get_u16_le();
+        let mut bytes = read_bytes_from_stream!(
+            stream,
+            (2 * signing_algorithm_count).into()
+        );
+        let mut signing_algorithms = vec![];
+        for _ in 0..signing_algorithm_count {
+            let signing_algorithm = bytes.get_u16_le();
+            signing_algorithms.push(signing_algorithm);
+        }
+        Ok(SigningCapabilities {
+            signing_algorithm_count,
+            signing_algorithms,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct EncryptionCapabilities {
+    pub cipher_count: u16,
+    pub ciphers: Vec<u16>,
+}
+
+impl EncryptionCapabilities {
+    pub fn to_bytes(&self, bytes: &mut BytesMut) {
+        bytes.put_u16_le(self.cipher_count);
+        for cipher in &self.ciphers {
+            bytes.put_u16_le(*cipher);
+        }
+    }
+
+    pub async fn from_stream(stream: &mut TcpStream) -> Result<Self, NtStatus> {
+        let mut bytes = read_bytes_from_stream!(stream, 2);
+        let cipher_count = bytes.get_u16_le();
+        let mut bytes =
+            read_bytes_from_stream!(stream, (2 * cipher_count).into());
+        let mut ciphers = vec![];
+        for _ in 0..cipher_count {
+            let cipher = bytes.get_u16_le();
+            ciphers.push(cipher);
+        }
+        Ok(EncryptionCapabilities {
+            cipher_count,
+            ciphers,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct NegotiateContext {
     pub context_type: u16,
     pub data_length: u16,
     reserved: u32,
-    pub data: Vec<u8>,
+    pub data: NegotiateContextData,
 }
 
 impl NegotiateContext {
@@ -358,8 +439,18 @@ impl NegotiateContext {
         bytes.put_u16_le(self.data_length);
         bytes.put_u32_le(self.reserved);
 
-        for byte in &self.data {
-            bytes.put_u8(*byte);
+        match &self.data {
+            NegotiateContextData::SigningCapabilities(data) => {
+                data.to_bytes(bytes)
+            }
+            NegotiateContextData::EncryptionCapabilities(data) => {
+                data.to_bytes(bytes)
+            }
+            NegotiateContextData::Data(data) => {
+                for byte in data {
+                    bytes.put_u8(*byte);
+                }
+            }
         }
     }
 }
@@ -421,11 +512,26 @@ impl NegotiateProtocolRequest {
                 let context_type = bytes.get_u16_le();
                 let data_length = bytes.get_u16_le();
                 let reserved = bytes.get_u32_le();
-                let mut data = vec![];
-                for _ in 0..data_length {
-                    let mut bytes = read_bytes_from_stream!(stream, 1);
-                    data.push(bytes.get_u8());
-                }
+                let data = match context_type {
+                    SMB2_SIGNING_CAPABILITIES => {
+                        NegotiateContextData::SigningCapabilities(
+                            SigningCapabilities::from_stream(stream).await?,
+                        )
+                    }
+                    SMB2_ENCRYPTION_CAPABILITIES => {
+                        NegotiateContextData::EncryptionCapabilities(
+                            EncryptionCapabilities::from_stream(stream).await?,
+                        )
+                    }
+                    _ => {
+                        let mut data = vec![];
+                        for _ in 0..data_length {
+                            let mut bytes = read_bytes_from_stream!(stream, 1);
+                            data.push(bytes.get_u8());
+                        }
+                        NegotiateContextData::Data(data)
+                    }
+                };
                 if i != negotiate_context_count - 1 {
                     let padding_bytes = if (data_length % 8) != 0 {
                         8 - (data_length % 8)
@@ -483,7 +589,10 @@ pub struct NegotiateProtocolResponse {
 }
 
 impl NegotiateProtocolResponse {
-    pub fn new(server_guid: u128) -> Result<Self, NtStatus> {
+    pub fn new(
+        server_guid: u128,
+        security_blob: Vec<u8>,
+    ) -> Result<Self, NtStatus> {
         let windows_epoch = match Utc.with_ymd_and_hms(1601, 1, 1, 0, 0, 0) {
             LocalResult::Single(datetime) => datetime,
             _ => return Err(NT_STATUS_UNSUCCESSFUL),
@@ -496,25 +605,50 @@ impl NegotiateProtocolResponse {
                 % 1_000_000_000
                 / 100) as u64;
 
+        let negotiate_context_list = vec![
+            NegotiateContext {
+                context_type: SMB2_SIGNING_CAPABILITIES,
+                data_length: 4,
+                reserved: 0,
+                data: NegotiateContextData::SigningCapabilities(
+                    SigningCapabilities {
+                        signing_algorithm_count: 1,
+                        signing_algorithms: vec![AES_GMAC],
+                    },
+                ),
+            },
+            NegotiateContext {
+                context_type: SMB2_ENCRYPTION_CAPABILITIES,
+                data_length: 4,
+                reserved: 0,
+                data: NegotiateContextData::EncryptionCapabilities(
+                    EncryptionCapabilities {
+                        cipher_count: 1,
+                        ciphers: vec![AES_256_GCM],
+                    },
+                ),
+            },
+        ];
+
         Ok(NegotiateProtocolResponse {
             structure_size: 65,
             security_mode: SMB2_NEGOTIATE_SIGNING_ENABLED
                 | SMB2_NEGOTIATE_SIGNING_REQUIRED,
             dialect_revision: SMB_3_1_1_DIALECT,
-            negotiate_context_count: 0, //TODO: add the negotiate contexts
+            negotiate_context_count: 2,
             server_guid,
             capabilities: 0,
             max_transact_size: 8388608,
             max_read_size: 8388608,
             max_write_size: 8388608,
             system_time: intervals,
-            server_start_time: 0,
-            security_buffer_offset: 0,   //TODO
-            security_buffer_length: 0,   //TODO
-            negotiate_context_offset: 0, //TODO
-            buffer: vec![],
+            server_start_time: intervals,
+            security_buffer_offset: 128,
+            security_buffer_length: security_blob.len() as u16,
+            negotiate_context_offset: (security_blob.len() + 128) as u32,
+            buffer: security_blob,
             padding: vec![],
-            negotiate_context_list: vec![],
+            negotiate_context_list,
         })
     }
 
@@ -545,8 +679,19 @@ impl NegotiateProtocolResponse {
         }
 
         // Add the negotiate context list
-        for context in &self.negotiate_context_list {
+        for i in 0..self.negotiate_context_count {
+            let context = &self.negotiate_context_list[i as usize];
             context.to_bytes(bytes);
+            if i != self.negotiate_context_count - 1 {
+                let padding_bytes = if (context.data_length % 8) != 0 {
+                    8 - (context.data_length % 8)
+                } else {
+                    0
+                };
+                for _ in 0..padding_bytes {
+                    bytes.put_u8(0);
+                }
+            }
         }
     }
 }

@@ -20,14 +20,16 @@ use tokio::net::TcpListener;
 use tracing::{debug, error};
 use uuid::Uuid;
 
-mod handler;
 mod connection;
+mod handler;
 
+#[derive(Clone)]
 pub struct Share {
     pub path: String,
     pub read_only: bool,
 }
 
+#[derive(Clone)]
 pub struct Server {
     server_guid: u128,
     shares: Vec<Share>,
@@ -50,18 +52,18 @@ impl Server {
             TcpListener::bind(format!("{}:{}", self.address, self.port))
                 .await?;
 
-        let server_guid = self.server_guid;
+        let ctx = self.clone();
         loop {
             // Accept an incoming connection
             match listener.accept().await {
                 Ok((mut stream, addr)) => {
+                    let c_ctx = ctx.clone();
                     debug!("Accepted connection from SMB3 client {}", addr);
 
                     // Spawn a new task for each connection
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handler::handle_client(&mut stream, server_guid)
-                                .await
+                            handler::handle_client(&mut stream, c_ctx).await
                         {
                             error!(
                                 "Error handling SMB3 client {}: {}",

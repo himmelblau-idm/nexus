@@ -15,21 +15,23 @@
    You should have received a copy of the GNU Lesser General Public License
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
+use crate::server::Server;
 use tokio::net::TcpStream;
 
+mod gssapi;
 mod negotiate;
 
 pub(crate) struct Connection<'a> {
     stream: &'a mut TcpStream,
-    server_guid: u128,
+    ctx: Server,
     session_id: u64,
 }
 
 impl<'a> Connection<'a> {
-    pub(crate) fn new(stream: &'a mut TcpStream, server_guid: u128) -> Self {
+    pub(crate) fn new(stream: &'a mut TcpStream, ctx: Server) -> Self {
         Connection {
             stream,
-            server_guid,
+            ctx,
             session_id: 0, // Initialized to 0. Will be established later.
         }
     }

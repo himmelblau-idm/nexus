@@ -17,15 +17,16 @@
 */
 use crate::error::*;
 use crate::server::connection::Connection;
+use crate::server::Server;
 use tokio::net::TcpStream;
 
 pub async fn handle_client(
     stream: &mut TcpStream,
-    server_guid: u128,
+    ctx: Server,
 ) -> Result<(), NtStatus> {
-    let mut session = Connection::new(stream, server_guid);
+    let mut connection = Connection::new(stream, ctx);
 
-    session.negotiate_dialect().await?;
+    connection.negotiate_dialect().await?;
 
     Err(NT_STATUS_NOT_IMPLEMENTED)
 }

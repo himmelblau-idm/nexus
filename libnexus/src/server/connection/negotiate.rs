@@ -33,6 +33,11 @@ impl Connection<'_> {
                 if !neg_req.dialects.contains(&SMB_3_1_1_DIALECT) {
                     return Err(NT_STATUS_PROTOCOL_NOT_SUPPORTED);
                 }
+                // We require signing, so it must at least be enabled by the client
+                if (neg_req.security_mode & SMB2_NEGOTIATE_SIGNING_ENABLED) == 0
+                {
+                    return Err(NT_STATUS_PROTOCOL_NOT_SUPPORTED);
+                }
                 let resp = SmbPacket {
                     header: SMBHeaderSync::new(
                         0,

@@ -17,9 +17,16 @@
 */
 use libnexus::server::Server;
 use std::error::Error;
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::DEBUG)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
     let server = Server::new("127.0.0.1", 445, vec![]);
     server.serve().await
 }

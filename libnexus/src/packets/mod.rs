@@ -21,6 +21,7 @@ use chrono::{LocalResult, TimeZone, Utc};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tracing::error;
+use rand::Rng;
 
 #[macro_export]
 macro_rules! error_resp_send {
@@ -103,12 +104,16 @@ pub const SMB2_GLOBAL_CAP_ENCRYPTION: u32 = 0x00000040;
 // Negotiate Context Type
 pub const SMB2_SIGNING_CAPABILITIES: u16 = 0x0008;
 pub const SMB2_ENCRYPTION_CAPABILITIES: u16 = 0x0002;
+pub const SMB2_PREAUTH_INTEGRITY_CAPABILITIES: u16 = 0x0001;
 
 // Signing Algorithm Id
 pub const AES_GMAC: u16 = 0x0002;
 
 // Encryption Ciphers
 pub const AES_256_GCM: u16 = 0x0004;
+
+// PreAuth Integrity Algorithms
+pub const SHA_512: u16 = 0x0001;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SmbPacket {
@@ -358,6 +363,7 @@ impl ErrorResponse {
 pub enum NegotiateContextData {
     SigningCapabilities(SigningCapabilities),
     EncryptionCapabilities(EncryptionCapabilities),
+    PreAuthIntegrityCapabilities(PreAuthIntegrityCapabilities),
     Data(Vec<u8>),
 }
 
@@ -426,6 +432,49 @@ impl EncryptionCapabilities {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct PreAuthIntegrityCapabilities {
+    pub hash_algorithm_count: u16,
+    pub salt_length: u16,
+    pub hash_algorithms: Vec<u16>,
+    pub salt: Vec<u8>,
+}
+
+impl PreAuthIntegrityCapabilities {
+    pub fn to_bytes(&self, bytes: &mut BytesMut) {
+        bytes.put_u16_le(self.hash_algorithm_count);
+        bytes.put_u16_le(self.salt_length);
+        for algorithm in &self.hash_algorithms {
+            bytes.put_u16_le(*algorithm);
+        }
+        for byte in &self.salt {
+            bytes.put_u8(*byte);
+        }
+    }
+
+    pub async fn from_stream(stream: &mut TcpStream) -> Result<Self, NtStatus> {
+        let mut bytes = read_bytes_from_stream!(stream, 4);
+        let hash_algorithm_count = bytes.get_u16_le();
+        let salt_length = bytes.get_u16_le();
+        let mut bytes = read_bytes_from_stream!(stream, ((hash_algorithm_count*2)+salt_length) as usize);
+        let mut hash_algorithms = vec![];
+        for _ in 0..hash_algorithm_count {
+            let algorithm = bytes.get_u16_le();
+            hash_algorithms.push(algorithm);
+        }
+        let mut salt = vec![];
+        for _ in 0..salt_length {
+            salt.push(bytes.get_u8());
+        }
+        Ok(PreAuthIntegrityCapabilities {
+            hash_algorithm_count,
+            salt_length,
+            hash_algorithms,
+            salt,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct NegotiateContext {
     pub context_type: u16,
     pub data_length: u16,
@@ -444,6 +493,9 @@ impl NegotiateContext {
                 data.to_bytes(bytes)
             }
             NegotiateContextData::EncryptionCapabilities(data) => {
+                data.to_bytes(bytes)
+            }
+            NegotiateContextData::PreAuthIntegrityCapabilities(data) => {
                 data.to_bytes(bytes)
             }
             NegotiateContextData::Data(data) => {
@@ -521,6 +573,11 @@ impl NegotiateProtocolRequest {
                     SMB2_ENCRYPTION_CAPABILITIES => {
                         NegotiateContextData::EncryptionCapabilities(
                             EncryptionCapabilities::from_stream(stream).await?,
+                        )
+                    }
+                    SMB2_PREAUTH_INTEGRITY_CAPABILITIES => {
+                        NegotiateContextData::PreAuthIntegrityCapabilities(
+                            PreAuthIntegrityCapabilities::from_stream(stream).await?,
                         )
                     }
                     _ => {
@@ -605,6 +662,8 @@ impl NegotiateProtocolResponse {
                 % 1_000_000_000
                 / 100) as u64;
 
+        let mut rng = rand::thread_rng();
+        let preauth_integrity_salt: [u8; 32] = rng.gen();
         let negotiate_context_list = vec![
             NegotiateContext {
                 context_type: SMB2_SIGNING_CAPABILITIES,
@@ -628,6 +687,19 @@ impl NegotiateProtocolResponse {
                     },
                 ),
             },
+            NegotiateContext {
+                context_type: SMB2_PREAUTH_INTEGRITY_CAPABILITIES,
+                data_length: 38,
+                reserved: 0,
+                data: NegotiateContextData::PreAuthIntegrityCapabilities(
+                    PreAuthIntegrityCapabilities {
+                        hash_algorithm_count: 1,
+                        salt_length: 32,
+                        hash_algorithms: vec![SHA_512],
+                        salt: preauth_integrity_salt.to_vec(),
+                    }
+                ),
+            },
         ];
 
         Ok(NegotiateProtocolResponse {
@@ -635,7 +707,7 @@ impl NegotiateProtocolResponse {
             security_mode: SMB2_NEGOTIATE_SIGNING_ENABLED
                 | SMB2_NEGOTIATE_SIGNING_REQUIRED,
             dialect_revision: SMB_3_1_1_DIALECT,
-            negotiate_context_count: 2,
+            negotiate_context_count: 3,
             server_guid,
             capabilities: 0,
             max_transact_size: 8388608,

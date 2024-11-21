@@ -16,7 +16,6 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 use crate::error::*;
-use crate::error_resp_send;
 use crate::packets::*;
 use crate::server::connection::Connection;
 use bytes::BytesMut;
@@ -110,13 +109,6 @@ impl Connection<'_> {
             }
             _ => return Err(NT_STATUS_INVALID_NETWORK_RESPONSE),
         }
-
-        error_resp_send!(
-            self.stream,
-            SmbCommand::Negotiate,
-            req.header.message_id,
-            NT_STATUS_NOT_IMPLEMENTED
-        );
-        Err(NT_STATUS_NOT_IMPLEMENTED)
+        Ok(())
     }
 }

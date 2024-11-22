@@ -16,18 +16,22 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 use crate::error::*;
+use crate::error_resp_send;
+use crate::packets::*;
 use crate::server::connection::Connection;
-use crate::server::Server;
-use tokio::net::TcpStream;
+use bytes::BytesMut;
+use tokio::io::AsyncWriteExt;
+use tracing::error;
 
-pub async fn handle_client(
-    stream: &mut TcpStream,
-    ctx: Server,
-) -> Result<(), NtStatus> {
-    let mut connection = Connection::new(stream, ctx);
-
-    connection.negotiate_dialect().await?;
-    connection.session_setup().await?;
-
-    Err(NT_STATUS_NOT_IMPLEMENTED)
+impl Connection<'_> {
+    pub(crate) async fn session_setup(&mut self) -> Result<(), NtStatus> {
+        let req = SmbPacket::from_stream(self.stream, true).await?;
+        error_resp_send!(
+            self.stream,
+            SmbCommand::SessionSetup,
+            req.header.message_id,
+            NT_STATUS_NOT_IMPLEMENTED
+        );
+        Err(NT_STATUS_NOT_IMPLEMENTED)
+    }
 }

@@ -15,19 +15,30 @@
    You should have received a copy of the GNU Lesser General Public License
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
-use crate::error::*;
-use crate::server::connection::Connection;
-use crate::server::Server;
+use std::error::Error;
 use tokio::net::TcpStream;
 
-pub async fn handle_client(
-    stream: &mut TcpStream,
-    ctx: Server,
-) -> Result<(), NtStatus> {
-    let mut connection = Connection::new(stream, ctx);
+mod connection;
+use crate::client::connection::Connection;
 
-    connection.negotiate_dialect().await?;
-    connection.session_setup().await?;
+pub struct Client {
+    connection: Connection,
+}
 
-    Err(NT_STATUS_NOT_IMPLEMENTED)
+impl Client {
+    pub async fn new(
+        server_address: &str,
+        server_port: u32,
+    ) -> Result<Self, Box<dyn Error>> {
+        Ok(Client {
+            connection: Connection::new(
+                TcpStream::connect(format!(
+                    "{}:{}",
+                    server_address, server_port
+                ))
+                .await?,
+            )
+            .await?,
+        })
+    }
 }

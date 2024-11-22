@@ -18,8 +18,8 @@
 use crate::server::Server;
 use tokio::net::TcpStream;
 
-mod gssapi;
 mod negotiate;
+mod session_setup;
 
 pub(crate) struct Connection<'a> {
     stream: &'a mut TcpStream,

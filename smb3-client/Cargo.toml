@@ -6,3 +6,6 @@ license = "GPL-3.0"
 
 [dependencies]
 libnexus = { path = "../libnexus" }
+tokio.workspace = true
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"

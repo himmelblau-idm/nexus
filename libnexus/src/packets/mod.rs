@@ -18,10 +18,10 @@
 use crate::error::*;
 use bytes::{Buf, BufMut, BytesMut};
 use chrono::{LocalResult, TimeZone, Utc};
+use rand::Rng;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tracing::error;
-use rand::Rng;
 
 #[macro_export]
 macro_rules! error_resp_send {
@@ -212,9 +212,9 @@ impl SmbPacket {
         self.header.to_bytes(&mut smb3_bytes);
         match &self.payload {
             Payload::ErrorResponse(resp) => resp.to_bytes(&mut smb3_bytes),
-            Payload::NegotiateProtocolRequest(_req) => {
-                panic!("Not implemented yet")
-            } //TODO
+            Payload::NegotiateProtocolRequest(req) => {
+                req.to_bytes(&mut smb3_bytes)
+            }
             Payload::NegotiateProtocolResponse(resp) => {
                 resp.to_bytes(&mut smb3_bytes)
             }
@@ -455,7 +455,10 @@ impl PreAuthIntegrityCapabilities {
         let mut bytes = read_bytes_from_stream!(stream, 4);
         let hash_algorithm_count = bytes.get_u16_le();
         let salt_length = bytes.get_u16_le();
-        let mut bytes = read_bytes_from_stream!(stream, ((hash_algorithm_count*2)+salt_length) as usize);
+        let mut bytes = read_bytes_from_stream!(
+            stream,
+            ((hash_algorithm_count * 2) + salt_length) as usize
+        );
         let mut hash_algorithms = vec![];
         for _ in 0..hash_algorithm_count {
             let algorithm = bytes.get_u16_le();
@@ -519,11 +522,67 @@ pub struct NegotiateProtocolRequest {
     pub negotiate_context_count: u16,
     reserved2: u16,
     pub dialects: Vec<u16>,
-    padding: Vec<u8>,
     pub negotiate_context_list: Vec<NegotiateContext>,
 }
 
 impl NegotiateProtocolRequest {
+    pub fn new(client_guid: u128) -> Result<Self, NtStatus> {
+        let mut rng = rand::thread_rng();
+        let preauth_integrity_salt: [u8; 32] = rng.gen();
+        let negotiate_context_list = vec![
+            NegotiateContext {
+                context_type: SMB2_SIGNING_CAPABILITIES,
+                data_length: 4,
+                reserved: 0,
+                data: NegotiateContextData::SigningCapabilities(
+                    SigningCapabilities {
+                        signing_algorithm_count: 1,
+                        signing_algorithms: vec![AES_GMAC],
+                    },
+                ),
+            },
+            NegotiateContext {
+                context_type: SMB2_ENCRYPTION_CAPABILITIES,
+                data_length: 4,
+                reserved: 0,
+                data: NegotiateContextData::EncryptionCapabilities(
+                    EncryptionCapabilities {
+                        cipher_count: 1,
+                        ciphers: vec![AES_256_GCM],
+                    },
+                ),
+            },
+            NegotiateContext {
+                context_type: SMB2_PREAUTH_INTEGRITY_CAPABILITIES,
+                data_length: 38,
+                reserved: 0,
+                data: NegotiateContextData::PreAuthIntegrityCapabilities(
+                    PreAuthIntegrityCapabilities {
+                        hash_algorithm_count: 1,
+                        salt_length: 32,
+                        hash_algorithms: vec![SHA_512],
+                        salt: preauth_integrity_salt.to_vec(),
+                    },
+                ),
+            },
+        ];
+
+        Ok(NegotiateProtocolRequest {
+            structure_size: 36,
+            dialect_count: 1,
+            security_mode: SMB2_NEGOTIATE_SIGNING_ENABLED
+                | SMB2_NEGOTIATE_SIGNING_REQUIRED,
+            reserved: 0,
+            capabilities: 0,
+            client_guid,
+            negotiate_context_offset: 64 + 36 + 2, // Header + Body + Dialect (still needs padding)
+            negotiate_context_count: negotiate_context_list.len() as u16,
+            reserved2: 0,
+            dialects: vec![SMB_3_1_1_DIALECT],
+            negotiate_context_list,
+        })
+    }
+
     pub async fn from_stream(stream: &mut TcpStream) -> Result<Self, NtStatus> {
         let mut bytes = read_bytes_from_stream!(stream, 36);
         let structure_size = bytes.get_u16_le();
@@ -577,7 +636,8 @@ impl NegotiateProtocolRequest {
                     }
                     SMB2_PREAUTH_INTEGRITY_CAPABILITIES => {
                         NegotiateContextData::PreAuthIntegrityCapabilities(
-                            PreAuthIntegrityCapabilities::from_stream(stream).await?,
+                            PreAuthIntegrityCapabilities::from_stream(stream)
+                                .await?,
                         )
                     }
                     _ => {
@@ -618,9 +678,55 @@ impl NegotiateProtocolRequest {
             negotiate_context_count,
             reserved2,
             dialects,
-            padding,
             negotiate_context_list,
         })
+    }
+
+    pub fn to_bytes(&self, bytes: &mut BytesMut) {
+        bytes.put_u16_le(self.structure_size);
+        bytes.put_u16_le(self.dialect_count);
+        bytes.put_u16_le(self.security_mode);
+        bytes.put_u16_le(self.reserved);
+        bytes.put_u32_le(self.capabilities);
+        bytes.put_u128_le(self.client_guid);
+
+        let offset = 64 + 36 + (self.dialect_count * 2);
+        let padding_bytes = if (offset % 8) != 0 {
+            8 - (offset % 8)
+        } else {
+            0
+        };
+
+        bytes
+            .put_u32_le(self.negotiate_context_offset + (padding_bytes as u32));
+        bytes.put_u16_le(self.negotiate_context_count);
+        bytes.put_u16_le(self.reserved2);
+
+        // Add the dialects
+        for dialect in &self.dialects {
+            bytes.put_u16_le(*dialect);
+        }
+
+        // Add the padding
+        for _ in 0..padding_bytes {
+            bytes.put_u8(0);
+        }
+
+        // Add the negotiate context list
+        for i in 0..self.negotiate_context_count {
+            let context = &self.negotiate_context_list[i as usize];
+            context.to_bytes(bytes);
+            if i != self.negotiate_context_count - 1 {
+                let padding_bytes = if (context.data_length % 8) != 0 {
+                    8 - (context.data_length % 8)
+                } else {
+                    0
+                };
+                for _ in 0..padding_bytes {
+                    bytes.put_u8(0);
+                }
+            }
+        }
     }
 }
 
@@ -641,7 +747,6 @@ pub struct NegotiateProtocolResponse {
     pub security_buffer_length: u16,
     pub negotiate_context_offset: u32,
     pub buffer: Vec<u8>,
-    pub(crate) padding: Vec<u8>,
     pub negotiate_context_list: Vec<NegotiateContext>,
 }
 
@@ -697,7 +802,7 @@ impl NegotiateProtocolResponse {
                         salt_length: 32,
                         hash_algorithms: vec![SHA_512],
                         salt: preauth_integrity_salt.to_vec(),
-                    }
+                    },
                 ),
             },
         ];
@@ -719,7 +824,6 @@ impl NegotiateProtocolResponse {
             security_buffer_length: security_blob.len() as u16,
             negotiate_context_offset: (security_blob.len() + 128) as u32,
             buffer: security_blob,
-            padding: vec![],
             negotiate_context_list,
         })
     }
@@ -738,7 +842,15 @@ impl NegotiateProtocolResponse {
         bytes.put_u64_le(self.server_start_time);
         bytes.put_u16_le(self.security_buffer_offset);
         bytes.put_u16_le(self.security_buffer_length);
-        bytes.put_u32_le(self.negotiate_context_offset);
+
+        let padding_bytes = if (self.buffer.len() % 8) != 0 {
+            8 - (self.buffer.len() % 8)
+        } else {
+            0
+        };
+
+        bytes
+            .put_u32_le(self.negotiate_context_offset + (padding_bytes as u32));
 
         // Add the buffer
         for byte in &self.buffer {
@@ -746,8 +858,8 @@ impl NegotiateProtocolResponse {
         }
 
         // Add the padding
-        for byte in &self.padding {
-            bytes.put_u8(*byte);
+        for _ in 0..padding_bytes {
+            bytes.put_u8(0);
         }
 
         // Add the negotiate context list

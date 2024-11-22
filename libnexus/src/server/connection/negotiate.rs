@@ -21,6 +21,7 @@ use crate::server::connection::Connection;
 use bytes::BytesMut;
 use tokio::io::AsyncWriteExt;
 use tracing::error;
+use crate::gssapi::create_security_blob;
 
 impl Connection<'_> {
     pub(crate) async fn negotiate_dialect(&mut self) -> Result<(), NtStatus> {
@@ -78,7 +79,7 @@ impl Connection<'_> {
                     // Client doesn't support encryption
                     return Err(NT_STATUS_PROTOCOL_NOT_SUPPORTED);
                 }
-                let security_blob = self.create_security_blob()?;
+                let security_blob = create_security_blob(None)?; // TODO: Add the mechToken
                 let resp = SmbPacket {
                     header: SMBHeaderSync::new(
                         0,
